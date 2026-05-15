@@ -151,9 +151,9 @@ export default function GameScreen({ config, onExit }) {
           {game.status === "starting" && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="text-center" data-testid="countdown-overlay">
-                <div className="text-2xl font-mono-ui neon-text-purple mb-2">// ROUND STARTING</div>
+                <div className="text-2xl font-terminal ink-text-purple mb-2">// INFECTION INCOMING</div>
                 <div
-                  className="font-display neon-text-green"
+                  className="font-splat ink-title-toxic ink-glitch"
                   style={{ fontSize: "180px", lineHeight: 1 }}
                   data-testid="countdown-number"
                 >
