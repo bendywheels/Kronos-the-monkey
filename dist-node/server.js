@@ -17,6 +17,12 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(cors({ origin: (process.env.CORS_ORIGINS || "*").split(",") }));
 
+// request logger (helpful while debugging on Hostinger)
+app.use((req, _res, next) => {
+  console.log(`[kronos] ${req.method} ${req.url}`);
+  next();
+});
+
 // ---------- Mongo ----------
 let db = null;
 async function initDb() {
@@ -31,7 +37,23 @@ const api = express.Router();
 
 api.get("/", (_req, res) => res.json({ message: "KRONOS ARENA online" }));
 
+api.get("/health", (_req, res) => {
+  const fs = require("fs");
+  res.json({
+    ok: true,
+    node: process.version,
+    cwd: process.cwd(),
+    dirname: __dirname,
+    public_exists: fs.existsSync(path.join(__dirname, "public")),
+    index_exists: fs.existsSync(path.join(__dirname, "public", "index.html")),
+    mongo_connected: db !== null,
+    db_name: DB_NAME,
+    port: PORT,
+  });
+});
+
 api.post("/status", async (req, res) => {
+  if (!db) return res.status(503).json({ error: "db_not_ready" });
   const doc = {
     id: randomUUID(),
     client_name: String(req.body?.client_name || ""),
@@ -42,6 +64,7 @@ api.post("/status", async (req, res) => {
 });
 
 api.get("/status", async (_req, res) => {
+  if (!db) return res.status(503).json({ error: "db_not_ready" });
   const rows = await db.collection("status_checks")
     .find({}, { projection: { _id: 0 } })
     .limit(1000)
@@ -50,6 +73,7 @@ api.get("/status", async (_req, res) => {
 });
 
 api.post("/rounds", async (req, res) => {
+  if (!db) return res.status(503).json({ error: "db_not_ready" });
   const b = req.body || {};
   const doc = {
     id: randomUUID(),
@@ -67,6 +91,7 @@ api.post("/rounds", async (req, res) => {
 });
 
 api.get("/leaderboard", async (req, res) => {
+  if (!db) return res.json([]);
   const limit = Math.min(parseInt(req.query.limit, 10) || 10, 100);
   const pipeline = [
     { $group: {
@@ -105,11 +130,15 @@ app.use((err, _req, res, _next) => {
 });
 
 // ---------- Start ----------
-initDb().then(() => {
-  app.listen(PORT, () => {
-    console.log(`[kronos] arena online → http://0.0.0.0:${PORT}`);
-  });
-}).catch(err => {
-  console.error("[kronos] failed to connect to mongo:", err);
-  process.exit(1);
+// IMPORTANT: start listening immediately so Phusion Passenger / Hostinger
+// can route requests. Mongo connects in the background; API routes that need
+// it will wait for `db` to be ready.
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`[kronos] arena listening on 0.0.0.0:${PORT}`);
+  console.log(`[kronos] __dirname=${__dirname}`);
+  console.log(`[kronos] cwd=${process.cwd()}`);
+});
+
+initDb().catch(err => {
+  console.error("[kronos] mongo connect error (server still up):", err.message);
 });
