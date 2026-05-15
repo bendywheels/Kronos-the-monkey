@@ -86,9 +86,29 @@ export function createGame({ nickname, botCount, durationSec = 90 }) {
     });
   }
   const botIdx = players.findIndex(p => p.isBot);
-  const patientZero = botIdx >= 0 ? botIdx : 0;
-  players[patientZero].infected = true;
-  players[patientZero].infectedAt = -INFECTION_GRACE;
+  // Start with up to 3 infected (1 + 2 extra), always leave >=1 survivor.
+  const infectedAtStart = Math.min(3, Math.max(1, totalPlayers - 1));
+  // Prefer bots as patient zero so the player isn't always infected.
+  const botIndices = players
+    .map((p, i) => (p.isBot ? i : -1))
+    .filter(i => i >= 0);
+  const chosen = shuffled(botIndices).slice(0, infectedAtStart);
+  if (chosen.length < infectedAtStart) {
+    const rest = players
+      .map((_, i) => i)
+      .filter(i => !chosen.includes(i));
+    for (const i of shuffled(rest)) {
+      if (chosen.length >= infectedAtStart) break;
+      chosen.push(i);
+    }
+  }
+  for (const i of chosen) {
+    players[i].infected = true;
+    players[i].infectedAt = -INFECTION_GRACE;
+  }
+  const youInitiallyInfected = chosen.includes(0);
+  // (legacy var kept for compatibility with existing code paths)
+  const patientZero = chosen[0] ?? (botIdx >= 0 ? botIdx : 0);
 
   return {
     players,
@@ -100,8 +120,9 @@ export function createGame({ nickname, botCount, durationSec = 90 }) {
     particles: [],
     infectionFlash: 0,
     playerInput: { ax: 0, ay: 0 },
-    youInitiallyInfected: players[patientZero].id === "you",
+    youInitiallyInfected,
     _bgCanvas: null,
+    _patientZero: patientZero,
   };
 }
 
@@ -202,6 +223,18 @@ export function update(game, dt) {
     resolveWalls(p);
 
     if (sp > 30) spawnTrail(p);
+    // dust particles from wheels when skating fast
+    if (sp > 120 && Math.random() < 0.6) {
+      game.particles.push({
+        x: p.x + (Math.random() - 0.5) * 10,
+        y: p.y + PLAYER_RADIUS * 0.85 + (Math.random() - 0.5) * 4,
+        vx: -p.vx * 0.06 + (Math.random() - 0.5) * 30,
+        vy: -10 - Math.random() * 25,
+        life: 0.45, max: 0.45,
+        kind: "dust",
+        size: 1.5 + Math.random() * 2.2,
+      });
+    }
     for (const t of p.trail) t.life -= dt;
     p.trail = p.trail.filter(t => t.life > 0);
 
@@ -648,8 +681,10 @@ function drawPallet(ctx, w) {
   ctx.strokeRect(w.x + 0.5, w.y + 0.5, w.w - 1, w.h - 1);
 }
 
-function drawPlayer(ctx, p, sprites, isLocal) {
-  // trail
+function drawPlayer(ctx, p, sprites, isLocal, t) {
+  const speed = Math.hypot(p.vx, p.vy);
+
+  // === GROUND TRAIL ===
   for (let i = 0; i < p.trail.length; i++) {
     const tr = p.trail[i];
     const alpha = (tr.life / 0.35) * 0.4;
@@ -663,7 +698,23 @@ function drawPlayer(ctx, p, sprites, isLocal) {
     ctx.fill();
   }
 
-  // pulses (on newly infected)
+  // === MOTION-BLUR GHOSTS (at high speed) ===
+  const img = p.infected ? sprites.infected : sprites.survivor;
+  const size = PLAYER_RADIUS * 2.8;
+  if (speed > 100 && img) {
+    for (let g = 3; g >= 1; g--) {
+      const tr = p.trail[p.trail.length - g * 2];
+      if (!tr) continue;
+      ctx.save();
+      ctx.globalAlpha = 0.08 * g;
+      ctx.translate(tr.x, tr.y - 4);
+      ctx.scale(p.facing, 1);
+      ctx.drawImage(img, -size / 2, -size / 2, size, size);
+      ctx.restore();
+    }
+  }
+
+  // === PULSES (newly infected ring) ===
   for (const pu of p.pulses) {
     ctx.strokeStyle = `rgba(168, 85, 247, ${pu.life / 0.7})`;
     ctx.lineWidth = 4;
@@ -677,10 +728,11 @@ function drawPlayer(ctx, p, sprites, isLocal) {
     ctx.stroke();
   }
 
-  // glow under feet
-  const grad = ctx.createRadialGradient(p.x, p.y, 5, p.x, p.y, PLAYER_RADIUS * 2.8);
+  // === FOOT GLOW (radial under feet) ===
+  const glowPulse = 1 + Math.sin(t * 4 + (p.aiPhase || 0)) * 0.07;
+  const grad = ctx.createRadialGradient(p.x, p.y, 5, p.x, p.y, PLAYER_RADIUS * 2.9 * glowPulse);
   if (p.infected) {
-    grad.addColorStop(0, "rgba(168, 85, 247, 0.75)");
+    grad.addColorStop(0, "rgba(168, 85, 247, 0.78)");
     grad.addColorStop(0.6, "rgba(132, 204, 22, 0.18)");
     grad.addColorStop(1, "rgba(168, 85, 247, 0)");
   } else {
@@ -689,47 +741,119 @@ function drawPlayer(ctx, p, sprites, isLocal) {
   }
   ctx.fillStyle = grad;
   ctx.beginPath();
-  ctx.arc(p.x, p.y, PLAYER_RADIUS * 2.8, 0, Math.PI * 2);
+  ctx.arc(p.x, p.y, PLAYER_RADIUS * 2.9 * glowPulse, 0, Math.PI * 2);
   ctx.fill();
 
-  // shadow under player
-  ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+  // === SHADOW (stretches with speed) ===
+  ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
   ctx.beginPath();
-  ctx.ellipse(p.x, p.y + PLAYER_RADIUS * 0.9, PLAYER_RADIUS * 0.7, PLAYER_RADIUS * 0.25, 0, 0, Math.PI * 2);
+  ctx.ellipse(
+    p.x,
+    p.y + PLAYER_RADIUS * 0.92,
+    PLAYER_RADIUS * (0.7 + speed / 700),
+    PLAYER_RADIUS * 0.25,
+    0, 0, Math.PI * 2,
+  );
   ctx.fill();
 
-  // sprite
-  const img = p.infected ? sprites.infected : sprites.survivor;
-  const size = PLAYER_RADIUS * 2.5;
+  // === SPRITE with BOB + LEAN animation ===
+  // bob: vertical oscillation tied to speed (0 when still)
+  const speedNorm = Math.min(speed / 240, 1);
+  const bobPhase = (p.aiPhase || 0) * 3 + t * 16;
+  const bob = Math.sin(bobPhase) * speedNorm * 4.5;
+  // pump-style lean alternates with bob frequency, plus directional lean
+  const dirLean = Math.max(-0.18, Math.min(0.18, (p.vx / MAX_SPEED) * 0.22 * p.facing));
+  const pumpLean = Math.cos(bobPhase) * speedNorm * 0.08;
+  const lean = dirLean + pumpLean;
+
   ctx.save();
-  ctx.translate(p.x, p.y);
+  // color-grade sprite to integrate with grungy scene (kills the "PNG sticker" feel)
+  if (p.infected) {
+    ctx.filter = "brightness(0.78) saturate(1.05) contrast(1.08) hue-rotate(-8deg)";
+  } else {
+    ctx.filter = "brightness(0.86) saturate(0.92) contrast(1.05)";
+  }
+  ctx.translate(p.x, p.y - 4 + bob);
+  ctx.rotate(lean);
   ctx.scale(p.facing, 1);
   if (img) {
-    ctx.drawImage(img, -size / 2, -size / 2 - 4, size, size);
+    ctx.drawImage(img, -size / 2, -size / 2, size, size);
   } else {
     ctx.fillStyle = p.infected ? "#a855f7" : "#fbbf24";
     ctx.beginPath();
     ctx.arc(0, 0, PLAYER_RADIUS, 0, Math.PI * 2);
     ctx.fill();
   }
+  ctx.filter = "none";
   ctx.restore();
 
-  // label
+  // === RIM-LIGHT OVERLAY (scene integration — kills the "PNG sticker" feel) ===
+  ctx.save();
+  ctx.globalCompositeOperation = "overlay";
+  const rim = ctx.createRadialGradient(p.x, p.y - 4 + bob, 4, p.x, p.y - 4 + bob, PLAYER_RADIUS * 1.4);
+  if (p.infected) {
+    rim.addColorStop(0, "rgba(192, 132, 252, 0.5)");
+    rim.addColorStop(1, "rgba(168, 85, 247, 0)");
+  } else {
+    rim.addColorStop(0, "rgba(253, 230, 138, 0.55)");
+    rim.addColorStop(1, "rgba(251, 191, 36, 0)");
+  }
+  ctx.fillStyle = rim;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y - 4 + bob, PLAYER_RADIUS * 1.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // === DARKEN BOTTOM EDGE (color-burn) to ground the sprite ===
+  ctx.save();
+  ctx.globalCompositeOperation = "multiply";
+  const burn = ctx.createLinearGradient(0, p.y, 0, p.y + PLAYER_RADIUS);
+  burn.addColorStop(0, "rgba(255,255,255,1)");
+  burn.addColorStop(1, "rgba(130, 100, 160, 1)");
+  ctx.fillStyle = burn;
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y + PLAYER_RADIUS * 0.45, PLAYER_RADIUS * 0.85, PLAYER_RADIUS * 0.45, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // === SKATE MOTION LINES under the board when fast ===
+  if (speed > 140) {
+    ctx.strokeStyle = `rgba(255, 255, 255, ${Math.min((speed - 140) / 120, 1) * 0.45})`;
+    ctx.lineWidth = 1.5;
+    const dx = -p.vx * 0.06;
+    const dy = -p.vy * 0.06;
+    for (let i = 0; i < 3; i++) {
+      const ox = (Math.random() - 0.5) * 8;
+      ctx.beginPath();
+      ctx.moveTo(p.x + ox, p.y + PLAYER_RADIUS * 0.85);
+      ctx.lineTo(p.x + ox + dx * (1 + i * 0.4), p.y + PLAYER_RADIUS * 0.85 + dy * (1 + i * 0.4));
+      ctx.stroke();
+    }
+  }
+
+  // === LABEL ===
   ctx.font = "bold 14px 'Permanent Marker', 'Special Elite', cursive";
   ctx.textAlign = "center";
   ctx.lineWidth = 3;
   ctx.strokeStyle = "rgba(0,0,0,0.9)";
   const label = (isLocal ? "★ " : "") + p.name + (p.infected ? " ☣" : "");
-  ctx.strokeText(label, p.x, p.y - PLAYER_RADIUS - 14);
+  ctx.strokeText(label, p.x, p.y - PLAYER_RADIUS - 14 + bob * 0.5);
   ctx.fillStyle = isLocal
     ? "#fbbf24"
     : (p.infected ? "#c084fc" : "#fde68a");
-  ctx.fillText(label, p.x, p.y - PLAYER_RADIUS - 14);
+  ctx.fillText(label, p.x, p.y - PLAYER_RADIUS - 14 + bob * 0.5);
 }
 
 function drawParticles(ctx, game) {
   for (const p of game.particles) {
     const a = Math.max(0, p.life / p.max);
+    if (p.kind === "dust") {
+      ctx.fillStyle = `rgba(190, 180, 210, ${a * 0.55})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size || 2, 0, Math.PI * 2);
+      ctx.fill();
+      continue;
+    }
     const c = p.color || "#a855f7";
     const rgb = c === "#84cc16" ? "132, 204, 22" : "168, 85, 247";
     ctx.fillStyle = `rgba(${rgb}, ${a})`;
@@ -768,8 +892,8 @@ export function render(canvas, game, sprites, t) {
   // players: survivors below, infected on top
   const survivors = game.players.filter(p => !p.infected);
   const infected = game.players.filter(p => p.infected);
-  for (const p of survivors) drawPlayer(ctx, p, sprites, p.id === "you");
-  for (const p of infected) drawPlayer(ctx, p, sprites, p.id === "you");
+  for (const p of survivors) drawPlayer(ctx, p, sprites, p.id === "you", t);
+  for (const p of infected) drawPlayer(ctx, p, sprites, p.id === "you", t);
 
   // infection flash overlay
   if (game.infectionFlash > 0) {
