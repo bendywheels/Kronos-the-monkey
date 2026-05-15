@@ -152,6 +152,14 @@ export default function Lobby({ onStart, initial }) {
         <div className="flex items-center gap-3 mb-2">
           <span className="text-xs font-mono-ui neon-text-purple tracking-widest">[ TOP_SURVIVORS ]</span>
           <div className="h-px flex-1 bg-gradient-to-r from-[#a855f7]/50 to-transparent" />
+          <a
+            data-testid="download-node-btn"
+            href="/kronos-arena-node-full.zip"
+            download
+            className="text-xs font-mono-ui px-3 py-1 border border-[#22ff88]/60 text-[#22ff88] hover:bg-[#22ff88]/10 rounded-sm tracking-widest"
+          >
+            ⬇ DOWNLOAD NODE.JS BUILD
+          </a>
         </div>
         <div className="flex gap-6 overflow-x-auto" data-testid="leaderboard-row">
           {leaderboard.length === 0 ? (
