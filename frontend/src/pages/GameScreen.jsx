@@ -307,8 +307,15 @@ export default function GameScreen({ mode = "single", config, session, onExit })
   };
 
   return (
-    <div className="relative w-full h-screen bg-[#04050a] overflow-hidden" data-testid="game-screen"
-      style={{ touchAction: "none", userSelect: "none" }}>
+    <div className="relative w-full overflow-hidden bg-[#04050a]" data-testid="game-screen"
+      style={{
+        touchAction: "none",
+        userSelect: "none",
+        height: "100vh",
+        minHeight: "100dvh",
+        paddingTop: "env(safe-area-inset-top)",
+        paddingBottom: "env(safe-area-inset-bottom)",
+      }}>
       <canvas ref={canvasRef} data-testid="game-canvas" className="absolute inset-0" style={{ touchAction: "none" }} />
       {game && (
         <>
@@ -321,6 +328,9 @@ export default function GameScreen({ mode = "single", config, session, onExit })
           {joystickRef.current.active && (
             <Joystick baseX={joystickRef.current.baseX} baseY={joystickRef.current.baseY}
               dx={joystickRef.current.dx} dy={joystickRef.current.dy} tick={joyTick} />
+          )}
+          {!joystickRef.current.active && (
+            <TouchHint />
           )}
           {mouseHoldRef.current && mouseWorldRef.current.active && transformRef.current && (
             <MouseTarget wx={mouseWorldRef.current.x} wy={mouseWorldRef.current.y} transform={transformRef.current} />
@@ -350,6 +360,38 @@ function Joystick({ baseX, baseY, dx, dy }) {
     <div className="pointer-events-none" style={{ position: "absolute", left: baseX - 70, top: baseY - 70, width: 140, height: 140, zIndex: 50 }} data-testid="virtual-joystick">
       <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "rgba(20, 16, 28, 0.55)", border: "2px solid rgba(168, 85, 247, 0.7)", boxShadow: "0 0 24px rgba(168,85,247,0.5), inset 0 0 24px rgba(168,85,247,0.2)" }} />
       <div style={{ position: "absolute", left: 70 + dx - 28, top: 70 + dy - 28, width: 56, height: 56, borderRadius: "50%", background: "radial-gradient(circle at 30% 30%, #c084fc, #6b21a8 70%)", border: "2px solid rgba(253, 230, 138, 0.9)", boxShadow: "0 0 18px rgba(168,85,247,0.8)" }} />
+    </div>
+  );
+}
+
+// Faint always-visible zone hint at bottom-left (only on touch devices)
+function TouchHint() {
+  const isTouch = typeof window !== "undefined" &&
+    ("ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0);
+  if (!isTouch) return null;
+  return (
+    <div
+      className="pointer-events-none"
+      style={{
+        position: "absolute",
+        left: "5%",
+        bottom: "8%",
+        width: 110,
+        height: 110,
+        borderRadius: "50%",
+        border: "2px dashed rgba(168, 85, 247, 0.35)",
+        boxShadow: "0 0 14px rgba(168,85,247,0.15)",
+        zIndex: 5,
+        opacity: 0.7,
+      }}
+      data-testid="touch-zone-hint"
+    >
+      <div style={{
+        position: "absolute", inset: 0,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontFamily: "VT323, monospace", fontSize: 11,
+        color: "rgba(192, 132, 252, 0.8)", letterSpacing: 2,
+      }}>DRAG</div>
     </div>
   );
 }

@@ -307,3 +307,34 @@ input[type="range"]::-moz-range-thumb {
         padding: 10px 14px;
     }
 }
+
+/* Tablet refinements */
+@media (min-width: 641px) and (max-width: 1023px) {
+    .ink-btn { font-size: 17px; padding: 13px 24px; }
+}
+
+/* Safe area insets for notch / home indicator */
+@supports (padding: env(safe-area-inset-top)) {
+    body {
+        padding-top: env(safe-area-inset-top);
+        padding-bottom: env(safe-area-inset-bottom);
+    }
+}
+
+/* Larger hit targets on touch devices */
+@media (hover: none) and (pointer: coarse) {
+    button, a {
+        min-height: 40px;
+    }
+    input[type="range"] {
+        height: 8px;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+        width: 28px;
+        height: 28px;
+    }
+    input[type="range"]::-moz-range-thumb {
+        width: 28px;
+        height: 28px;
+    }
+}
