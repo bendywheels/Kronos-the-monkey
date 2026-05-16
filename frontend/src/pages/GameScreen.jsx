@@ -14,7 +14,6 @@ import { getSocket } from "../multiplayer/socket";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
-const JOY_RADIUS = 60;
 
 export default function GameScreen({ mode = "single", config, session, onExit }) {
   const canvasRef = useRef(null);
@@ -23,14 +22,21 @@ export default function GameScreen({ mode = "single", config, session, onExit })
   const inputRef = useRef({ w: false, a: false, s: false, d: false });
   const mouseHoldRef = useRef(false);
   const mouseWorldRef = useRef({ x: 0, y: 0, active: false });
-  const joystickRef = useRef({ active: false, baseX: 0, baseY: 0, dx: 0, dy: 0, pointerId: null });
   const transformRef = useRef(null);
 
-  const [joyTick, setJoyTick] = useState(0);
   const [, setTick] = useState(0);
   const [, setMutedState] = useState(isMuted());
   const submittedRef = useRef(false);
   const lastInputRef = useRef({ ax: 0, ay: 0, sentAt: 0 });
+
+  // Auto-request fullscreen on small touch devices (uses last user gesture before mount)
+  useEffect(() => {
+    const isTouch = "ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0;
+    const isNarrow = window.innerWidth < 900;
+    if (isTouch && isNarrow && document.documentElement.requestFullscreen && !document.fullscreenElement) {
+      document.documentElement.requestFullscreen({ navigationUI: "hide" }).catch(() => {});
+    }
+  }, []);
 
   useEffect(() => {
     initAudio();
@@ -178,36 +184,20 @@ export default function GameScreen({ mode = "single", config, session, onExit })
         active: true,
       };
     };
-    const isOnJoystick = (cx, cy) => cx < window.innerWidth * 0.45 && cy > window.innerHeight * 0.55;
+    const isOnJoystick = (cx, cy) => false;
 
     const onPointerDown = (e) => {
       if (e.target.closest("[data-no-game-input]")) return;
-      if (e.pointerType === "touch" && isOnJoystick(e.clientX, e.clientY)) {
-        joystickRef.current = { active: true, baseX: e.clientX, baseY: e.clientY, dx: 0, dy: 0, pointerId: e.pointerId };
-        setJoyTick(t => t + 1);
-      } else {
-        mouseHoldRef.current = true;
-        updateMouseWorld(e.clientX, e.clientY);
-      }
+      // Unified: any pointer (mouse OR touch) hold → move toward that point
+      mouseHoldRef.current = true;
+      updateMouseWorld(e.clientX, e.clientY);
       e.preventDefault();
     };
     const onPointerMove = (e) => {
-      const j = joystickRef.current;
-      if (j.active && j.pointerId === e.pointerId) {
-        j.dx = e.clientX - j.baseX; j.dy = e.clientY - j.baseY;
-        const len = Math.hypot(j.dx, j.dy);
-        if (len > JOY_RADIUS) { j.dx = (j.dx / len) * JOY_RADIUS; j.dy = (j.dy / len) * JOY_RADIUS; }
-        setJoyTick(t => t + 1);
-      } else if (mouseHoldRef.current || e.pointerType !== "touch") {
-        updateMouseWorld(e.clientX, e.clientY);
-      }
+      if (mouseHoldRef.current) updateMouseWorld(e.clientX, e.clientY);
+      else if (e.pointerType !== "touch") updateMouseWorld(e.clientX, e.clientY);
     };
-    const onPointerUp = (e) => {
-      const j = joystickRef.current;
-      if (j.active && (j.pointerId === e.pointerId || e.pointerId == null)) {
-        joystickRef.current = { active: false, baseX: 0, baseY: 0, dx: 0, dy: 0, pointerId: null };
-        setJoyTick(t => t + 1);
-      }
+    const onPointerUp = () => {
       mouseHoldRef.current = false;
     };
 
@@ -233,16 +223,9 @@ export default function GameScreen({ mode = "single", config, session, onExit })
       lastT = now;
 
       const g = gameRef.current;
-      // compute input
+      // compute input — unified mouse/touch hold + WASD
       let ax = 0, ay = 0;
-      const j = joystickRef.current;
-      if (j.active) {
-        const len = Math.hypot(j.dx, j.dy);
-        if (len > 8) {
-          const norm = Math.min(len / JOY_RADIUS, 1);
-          ax = (j.dx / len) * norm; ay = (j.dy / len) * norm;
-        }
-      } else if (mouseHoldRef.current && mouseWorldRef.current.active) {
+      if (mouseHoldRef.current && mouseWorldRef.current.active) {
         const you = g.players.find(p => p.id === g._localId);
         if (you) {
           const dx = mouseWorldRef.current.x - you.x;
@@ -325,13 +308,6 @@ export default function GameScreen({ mode = "single", config, session, onExit })
             onFullscreen={handleFullscreen}
             roomId={mode === "online" ? session?.roomId : null}
           />
-          {joystickRef.current.active && (
-            <Joystick baseX={joystickRef.current.baseX} baseY={joystickRef.current.baseY}
-              dx={joystickRef.current.dx} dy={joystickRef.current.dy} tick={joyTick} />
-          )}
-          {!joystickRef.current.active && (
-            <TouchHint />
-          )}
           {mouseHoldRef.current && mouseWorldRef.current.active && transformRef.current && (
             <MouseTarget wx={mouseWorldRef.current.x} wy={mouseWorldRef.current.y} transform={transformRef.current} />
           )}
@@ -351,47 +327,6 @@ export default function GameScreen({ mode = "single", config, session, onExit })
           )}
         </>
       )}
-    </div>
-  );
-}
-
-function Joystick({ baseX, baseY, dx, dy }) {
-  return (
-    <div className="pointer-events-none" style={{ position: "absolute", left: baseX - 70, top: baseY - 70, width: 140, height: 140, zIndex: 50 }} data-testid="virtual-joystick">
-      <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "rgba(20, 16, 28, 0.55)", border: "2px solid rgba(168, 85, 247, 0.7)", boxShadow: "0 0 24px rgba(168,85,247,0.5), inset 0 0 24px rgba(168,85,247,0.2)" }} />
-      <div style={{ position: "absolute", left: 70 + dx - 28, top: 70 + dy - 28, width: 56, height: 56, borderRadius: "50%", background: "radial-gradient(circle at 30% 30%, #c084fc, #6b21a8 70%)", border: "2px solid rgba(253, 230, 138, 0.9)", boxShadow: "0 0 18px rgba(168,85,247,0.8)" }} />
-    </div>
-  );
-}
-
-// Faint always-visible zone hint at bottom-left (only on touch devices)
-function TouchHint() {
-  const isTouch = typeof window !== "undefined" &&
-    ("ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0);
-  if (!isTouch) return null;
-  return (
-    <div
-      className="pointer-events-none"
-      style={{
-        position: "absolute",
-        left: "5%",
-        bottom: "8%",
-        width: 110,
-        height: 110,
-        borderRadius: "50%",
-        border: "2px dashed rgba(168, 85, 247, 0.35)",
-        boxShadow: "0 0 14px rgba(168,85,247,0.15)",
-        zIndex: 5,
-        opacity: 0.7,
-      }}
-      data-testid="touch-zone-hint"
-    >
-      <div style={{
-        position: "absolute", inset: 0,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontFamily: "VT323, monospace", fontSize: 11,
-        color: "rgba(192, 132, 252, 0.8)", letterSpacing: 2,
-      }}>DRAG</div>
     </div>
   );
 }

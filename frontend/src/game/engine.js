@@ -685,6 +685,36 @@ function drawPallet(ctx, w) {
 function drawPlayer(ctx, p, sprites, isLocal, t) {
   const speed = Math.hypot(p.vx, p.vy);
 
+  // === LOCAL PLAYER: bright pulsing ground ring (drawn behind everything else) ===
+  if (isLocal) {
+    const pr = 1 + Math.sin(t * 3.2) * 0.18;
+    // outer wide halo
+    const halo = ctx.createRadialGradient(p.x, p.y, PLAYER_RADIUS * 1.6, p.x, p.y, PLAYER_RADIUS * 3.8 * pr);
+    halo.addColorStop(0, "rgba(253, 230, 138, 0)");
+    halo.addColorStop(0.55, "rgba(253, 230, 138, 0.32)");
+    halo.addColorStop(1, "rgba(253, 230, 138, 0)");
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, PLAYER_RADIUS * 3.8 * pr, 0, Math.PI * 2);
+    ctx.fill();
+    // crisp gold ring on the floor
+    ctx.strokeStyle = `rgba(251, 191, 36, ${0.7 + Math.sin(t * 3.2) * 0.2})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y + PLAYER_RADIUS * 0.7, PLAYER_RADIUS * 1.5 * pr, 0, Math.PI * 2);
+    ctx.stroke();
+    // dashed second ring
+    ctx.save();
+    ctx.setLineDash([6, 6]);
+    ctx.lineDashOffset = -t * 30;
+    ctx.strokeStyle = "rgba(251, 191, 36, 0.55)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y + PLAYER_RADIUS * 0.7, PLAYER_RADIUS * 1.9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // === GROUND TRAIL ===
   for (let i = 0; i < p.trail.length; i++) {
     const tr = p.trail[i];
@@ -843,6 +873,35 @@ function drawPlayer(ctx, p, sprites, isLocal, t) {
     ? "#fbbf24"
     : (p.infected ? "#c084fc" : "#fde68a");
   ctx.fillText(label, p.x, p.y - PLAYER_RADIUS - 14 + bob * 0.5);
+
+  // === LOCAL PLAYER: big "YOU" chevron above head ===
+  if (isLocal) {
+    const bobY = Math.sin(t * 4) * 4;
+    const cy = p.y - PLAYER_RADIUS - 38 + bobY;
+    // chevron triangle pointing down
+    ctx.save();
+    ctx.fillStyle = "#fbbf24";
+    ctx.shadowColor = "rgba(251, 191, 36, 0.9)";
+    ctx.shadowBlur = 16;
+    ctx.beginPath();
+    ctx.moveTo(p.x - 11, cy);
+    ctx.lineTo(p.x + 11, cy);
+    ctx.lineTo(p.x, cy + 14);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // "YOU" badge above the chevron
+    ctx.font = "bold 11px 'Bungee', sans-serif";
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.9)";
+    ctx.strokeText("YOU", p.x, cy - 6);
+    ctx.fillStyle = "#fbbf24";
+    ctx.fillText("YOU", p.x, cy - 6);
+    ctx.restore();
+  }
 }
 
 function drawParticles(ctx, game) {
@@ -890,12 +949,15 @@ export function render(canvas, game, sprites, t) {
   // particles behind players
   drawParticles(ctx, game);
 
-  // players: survivors below, infected on top
+  // players: survivors below, infected on top, local player always drawn last
   const localId = game._localId || "you";
-  const survivors = game.players.filter(p => !p.infected);
-  const infected = game.players.filter(p => p.infected);
-  for (const p of survivors) drawPlayer(ctx, p, sprites, p.id === localId, t);
-  for (const p of infected) drawPlayer(ctx, p, sprites, p.id === localId, t);
+  const localPlayer = game.players.find(p => p.id === localId);
+  const others = game.players.filter(p => p.id !== localId);
+  const otherSurvivors = others.filter(p => !p.infected);
+  const otherInfected = others.filter(p => p.infected);
+  for (const p of otherSurvivors) drawPlayer(ctx, p, sprites, false, t);
+  for (const p of otherInfected) drawPlayer(ctx, p, sprites, false, t);
+  if (localPlayer) drawPlayer(ctx, localPlayer, sprites, true, t);
 
   // infection flash overlay
   if (game.infectionFlash > 0) {
