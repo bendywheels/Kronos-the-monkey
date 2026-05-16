@@ -123,6 +123,7 @@ export function createGame({ nickname, botCount, durationSec = 90 }) {
     youInitiallyInfected,
     _bgCanvas: null,
     _patientZero: patientZero,
+    _localId: "you",
   };
 }
 
@@ -890,10 +891,11 @@ export function render(canvas, game, sprites, t) {
   drawParticles(ctx, game);
 
   // players: survivors below, infected on top
+  const localId = game._localId || "you";
   const survivors = game.players.filter(p => !p.infected);
   const infected = game.players.filter(p => p.infected);
-  for (const p of survivors) drawPlayer(ctx, p, sprites, p.id === "you", t);
-  for (const p of infected) drawPlayer(ctx, p, sprites, p.id === "you", t);
+  for (const p of survivors) drawPlayer(ctx, p, sprites, p.id === localId, t);
+  for (const p of infected) drawPlayer(ctx, p, sprites, p.id === localId, t);
 
   // infection flash overlay
   if (game.infectionFlash > 0) {

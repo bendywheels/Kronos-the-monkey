@@ -10,55 +10,68 @@ import {
 } from "../game/audio";
 import HUD from "../components/HUD";
 import EndOverlay from "../components/EndOverlay";
+import { getSocket } from "../multiplayer/socket";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
-
 const JOY_RADIUS = 60;
 
-export default function GameScreen({ config, onExit }) {
+export default function GameScreen({ mode = "single", config, session, onExit }) {
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
   const spritesRef = useRef({ survivor: null, infected: null });
   const inputRef = useRef({ w: false, a: false, s: false, d: false });
-
-  // Input state refs
   const mouseHoldRef = useRef(false);
   const mouseWorldRef = useRef({ x: 0, y: 0, active: false });
   const joystickRef = useRef({ active: false, baseX: 0, baseY: 0, dx: 0, dy: 0, pointerId: null });
   const transformRef = useRef(null);
 
-  const [joyTick, setJoyTick] = useState(0); // re-render when joystick visual changes
+  const [joyTick, setJoyTick] = useState(0);
   const [, setTick] = useState(0);
   const [, setMutedState] = useState(isMuted());
   const submittedRef = useRef(false);
+  const lastInputRef = useRef({ ax: 0, ay: 0, sentAt: 0 });
 
   useEffect(() => {
     initAudio();
     startMusic();
     sfxRoundStart();
 
-    const game = createGame({
-      nickname: config.nickname,
-      botCount: config.botCount,
-      durationSec: 90,
-    });
-    game._onInfection = () => sfxInfection();
-    game._onEnd = (result) => {
-      if (result.youWon) sfxWin(); else sfxLose();
-      if (!submittedRef.current) {
-        submittedRef.current = true;
-        axios.post(`${API}/rounds`, {
-          nickname: config.nickname,
-          survived: result.youSurvived,
-          won: result.youWon,
-          role: result.role,
-          survived_seconds: result.survivedSeconds,
-          bots_count: config.botCount,
-          survivors_left: result.survivorsLeft,
-        }).catch(() => {});
-      }
-    };
+    // ===== Build initial game state =====
+    let game;
+    if (mode === "single") {
+      game = createGame({
+        nickname: config.nickname,
+        botCount: config.botCount,
+        durationSec: 90,
+      });
+      game._onInfection = () => sfxInfection();
+      game._onEnd = (result) => {
+        if (result.youWon) sfxWin(); else sfxLose();
+        if (!submittedRef.current) {
+          submittedRef.current = true;
+          axios.post(`${API}/rounds`, {
+            nickname: config.nickname,
+            survived: result.youSurvived, won: result.youWon, role: result.role,
+            survived_seconds: result.survivedSeconds, bots_count: config.botCount,
+            survivors_left: result.survivorsLeft, mode: "single",
+          }).catch(() => {});
+        }
+      };
+      game._localId = "you";
+    } else {
+      // ONLINE mode: lightweight skeleton, will be replaced by server state
+      game = {
+        players: [],
+        duration: 90, elapsed: 0,
+        status: "starting", countdown: 3.0,
+        result: null, particles: [],
+        infectionFlash: 0, playerInput: { ax: 0, ay: 0 },
+        youInitiallyInfected: false,
+        _bgCanvas: null,
+        _localId: session?.selfId || "",
+      };
+    }
     gameRef.current = game;
 
     let rafId = 0;
@@ -67,16 +80,85 @@ export default function GameScreen({ config, onExit }) {
 
     loadAllSprites().then((s) => { spritesRef.current = s; });
 
-    // ===== keyboard =====
+    // ===== Socket setup for online mode =====
+    let socket = null;
+    if (mode === "online") {
+      socket = getSocket();
+
+      const applyServerState = (payload) => {
+        if (!gameRef.current) return;
+        const g = gameRef.current;
+        // map server -> client game shape
+        g.players = payload.players.map(p => {
+          const prev = g.players.find(x => x.id === p.id);
+          return {
+            id: p.id,
+            name: p.name,
+            isBot: p.isBot,
+            x: p.x, y: p.y,
+            vx: p.vx, vy: p.vy,
+            facing: p.facing,
+            infected: p.infected,
+            alive: p.alive,
+            trail: prev ? prev.trail : [],
+            pulses: p.pulses || [],
+            aiPhase: prev?.aiPhase ?? Math.random() * Math.PI * 2,
+            infectedAt: 0,
+          };
+        });
+        g.duration = payload.duration;
+        g.elapsed = payload.elapsed;
+        g.countdown = payload.countdown;
+        g.infectionFlash = payload.infectionFlash;
+        g.status = payload.phase === "lobby" ? "starting" :
+                   payload.phase === "starting" ? "starting" :
+                   payload.phase === "ended" ? "ended" : "playing";
+
+        if (payload.phase === "ended" && payload.result) {
+          const you = g.players.find(p => p.id === g._localId);
+          const youSurvived = you ? !you.infected : false;
+          const youWon = payload.result.winner === "survivors" ? youSurvived : !youSurvived;
+          g.result = {
+            winner: payload.result.winner,
+            survivorsLeft: payload.result.survivorsLeft,
+            youSurvived,
+            youWon,
+            role: youSurvived ? "survivor" : "infected",
+            survivedSeconds: payload.result.survivedSeconds,
+          };
+          if (!submittedRef.current) {
+            submittedRef.current = true;
+            if (youWon) sfxWin(); else sfxLose();
+          }
+        }
+      };
+
+      const onState = (payload) => applyServerState(payload);
+      const onStarting = (payload) => applyServerState(payload);
+      const onEnded = (payload) => applyServerState(payload);
+      const onInfection = () => sfxInfection();
+
+      socket.on("state", onState);
+      socket.on("round_starting", onStarting);
+      socket.on("round_ended", onEnded);
+      socket.on("infection", onInfection);
+
+      // cleanup
+      var cleanupSocket = () => {
+        socket.off("state", onState);
+        socket.off("round_starting", onStarting);
+        socket.off("round_ended", onEnded);
+        socket.off("infection", onInfection);
+      };
+    }
+
+    // ===== Keyboard =====
     const onKey = (e, down) => {
       const k = e.key.toLowerCase();
-      if (["w", "a", "s", "d"].includes(k)) {
-        inputRef.current[k] = down;
-        e.preventDefault();
-      } else if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) {
+      if (["w", "a", "s", "d"].includes(k)) { inputRef.current[k] = down; e.preventDefault(); }
+      else if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) {
         const map = { arrowup: "w", arrowdown: "s", arrowleft: "a", arrowright: "d" };
-        inputRef.current[map[k]] = down;
-        e.preventDefault();
+        inputRef.current[map[k]] = down; e.preventDefault();
       }
     };
     const kd = (e) => onKey(e, true);
@@ -84,34 +166,24 @@ export default function GameScreen({ config, onExit }) {
     window.addEventListener("keydown", kd);
     window.addEventListener("keyup", ku);
 
-    // ===== pointer events (unifies mouse + touch) =====
+    // ===== Pointer =====
     const updateMouseWorld = (clientX, clientY) => {
       const canvas = canvasRef.current;
       const tr = transformRef.current;
       if (!canvas || !tr) return;
       const rect = canvas.getBoundingClientRect();
-      const x = (clientX - rect.left - tr.offX) / tr.scale;
-      const y = (clientY - rect.top - tr.offY) / tr.scale;
-      mouseWorldRef.current = { x, y, active: true };
+      mouseWorldRef.current = {
+        x: (clientX - rect.left - tr.offX) / tr.scale,
+        y: (clientY - rect.top - tr.offY) / tr.scale,
+        active: true,
+      };
     };
-
-    const isOnJoystick = (clientX, clientY) => {
-      // joystick zone: bottom-left quarter of the screen
-      return clientX < window.innerWidth * 0.45 && clientY > window.innerHeight * 0.55;
-    };
+    const isOnJoystick = (cx, cy) => cx < window.innerWidth * 0.45 && cy > window.innerHeight * 0.55;
 
     const onPointerDown = (e) => {
-      // ignore if event originated from a HUD button
       if (e.target.closest("[data-no-game-input]")) return;
-      const isTouch = e.pointerType === "touch";
-      if (isTouch && isOnJoystick(e.clientX, e.clientY)) {
-        joystickRef.current = {
-          active: true,
-          baseX: e.clientX,
-          baseY: e.clientY,
-          dx: 0, dy: 0,
-          pointerId: e.pointerId,
-        };
+      if (e.pointerType === "touch" && isOnJoystick(e.clientX, e.clientY)) {
+        joystickRef.current = { active: true, baseX: e.clientX, baseY: e.clientY, dx: 0, dy: 0, pointerId: e.pointerId };
         setJoyTick(t => t + 1);
       } else {
         mouseHoldRef.current = true;
@@ -122,17 +194,11 @@ export default function GameScreen({ config, onExit }) {
     const onPointerMove = (e) => {
       const j = joystickRef.current;
       if (j.active && j.pointerId === e.pointerId) {
-        j.dx = e.clientX - j.baseX;
-        j.dy = e.clientY - j.baseY;
+        j.dx = e.clientX - j.baseX; j.dy = e.clientY - j.baseY;
         const len = Math.hypot(j.dx, j.dy);
-        if (len > JOY_RADIUS) {
-          j.dx = (j.dx / len) * JOY_RADIUS;
-          j.dy = (j.dy / len) * JOY_RADIUS;
-        }
+        if (len > JOY_RADIUS) { j.dx = (j.dx / len) * JOY_RADIUS; j.dy = (j.dy / len) * JOY_RADIUS; }
         setJoyTick(t => t + 1);
-      } else if (e.pointerType !== "touch") {
-        updateMouseWorld(e.clientX, e.clientY);
-      } else if (mouseHoldRef.current) {
+      } else if (mouseHoldRef.current || e.pointerType !== "touch") {
         updateMouseWorld(e.clientX, e.clientY);
       }
     };
@@ -167,41 +233,45 @@ export default function GameScreen({ config, onExit }) {
       lastT = now;
 
       const g = gameRef.current;
-      // Determine input priority: joystick > mouse hold > WASD
+      // compute input
       let ax = 0, ay = 0;
       const j = joystickRef.current;
       if (j.active) {
         const len = Math.hypot(j.dx, j.dy);
         if (len > 8) {
           const norm = Math.min(len / JOY_RADIUS, 1);
-          ax = (j.dx / len) * norm;
-          ay = (j.dy / len) * norm;
+          ax = (j.dx / len) * norm; ay = (j.dy / len) * norm;
         }
       } else if (mouseHoldRef.current && mouseWorldRef.current.active) {
-        const you = g.players.find(p => p.id === "you");
+        const you = g.players.find(p => p.id === g._localId);
         if (you) {
           const dx = mouseWorldRef.current.x - you.x;
           const dy = mouseWorldRef.current.y - you.y;
           const d = Math.hypot(dx, dy);
           if (d > 12) {
             const norm = Math.min(d / 80, 1);
-            ax = (dx / d) * norm;
-            ay = (dy / d) * norm;
+            ax = (dx / d) * norm; ay = (dy / d) * norm;
           }
         }
       } else {
         ax = (inputRef.current.d ? 1 : 0) - (inputRef.current.a ? 1 : 0);
         ay = (inputRef.current.s ? 1 : 0) - (inputRef.current.w ? 1 : 0);
       }
-      setPlayerInput(g, ax, ay);
 
-      update(g, dt);
+      if (mode === "single") {
+        setPlayerInput(g, ax, ay);
+        update(g, dt);
+      } else {
+        // online: send input to server at ~30Hz, no local simulation
+        const last = lastInputRef.current;
+        if (now - last.sentAt > 33 || Math.abs(ax - last.ax) > 0.05 || Math.abs(ay - last.ay) > 0.05) {
+          lastInputRef.current = { ax, ay, sentAt: now };
+          if (socket) socket.emit("input", { ax, ay });
+        }
+      }
 
       const c = canvasRef.current;
-      if (c) {
-        const transform = render(c, g, spritesRef.current, now / 1000);
-        transformRef.current = transform;
-      }
+      if (c) transformRef.current = render(c, g, spritesRef.current, now / 1000);
 
       setTick(t => (t + 1) % 1000000);
       rafId = requestAnimationFrame(loop);
@@ -220,91 +290,51 @@ export default function GameScreen({ config, onExit }) {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
+      if (cleanupSocket) cleanupSocket();
+      if (mode === "online" && socket) socket.emit("leave_room");
       stopMusic();
     };
-  }, [config]);
+  }, [mode, config, session]);
 
   const game = gameRef.current;
 
-  const handleToggleMute = () => {
-    const m = !isMuted();
-    setMuted(m);
-    setMutedState(m);
-    sfxClick();
-  };
-
+  const handleToggleMute = () => { setMuted(!isMuted()); setMutedState(isMuted()); sfxClick(); };
   const handleExit = () => { sfxClick(); onExit(); };
-
   const handleFullscreen = () => {
     sfxClick();
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen?.().catch(() => {});
-    } else {
-      document.exitFullscreen?.();
-    }
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
+    else document.exitFullscreen?.();
   };
 
   return (
-    <div
-      className="relative w-full h-screen bg-[#04050a] overflow-hidden"
-      data-testid="game-screen"
-      style={{ touchAction: "none", userSelect: "none" }}
-    >
-      <canvas
-        ref={canvasRef}
-        data-testid="game-canvas"
-        className="absolute inset-0"
-        style={{ touchAction: "none" }}
-      />
+    <div className="relative w-full h-screen bg-[#04050a] overflow-hidden" data-testid="game-screen"
+      style={{ touchAction: "none", userSelect: "none" }}>
+      <canvas ref={canvasRef} data-testid="game-canvas" className="absolute inset-0" style={{ touchAction: "none" }} />
       {game && (
         <>
           <HUD
-            game={game}
-            arenaW={GAME_CONST.ARENA_W}
-            arenaH={GAME_CONST.ARENA_H}
-            onExit={handleExit}
-            muted={isMuted()}
-            onToggleMute={handleToggleMute}
+            game={game} arenaW={GAME_CONST.ARENA_W} arenaH={GAME_CONST.ARENA_H}
+            onExit={handleExit} muted={isMuted()} onToggleMute={handleToggleMute}
             onFullscreen={handleFullscreen}
+            roomId={mode === "online" ? session?.roomId : null}
           />
-
-          {/* virtual joystick visual */}
           {joystickRef.current.active && (
-            <Joystick
-              baseX={joystickRef.current.baseX}
-              baseY={joystickRef.current.baseY}
-              dx={joystickRef.current.dx}
-              dy={joystickRef.current.dy}
-              tick={joyTick}
-            />
+            <Joystick baseX={joystickRef.current.baseX} baseY={joystickRef.current.baseY}
+              dx={joystickRef.current.dx} dy={joystickRef.current.dy} tick={joyTick} />
           )}
-
-          {/* mouse target indicator */}
           {mouseHoldRef.current && mouseWorldRef.current.active && transformRef.current && (
-            <MouseTarget
-              wx={mouseWorldRef.current.x}
-              wy={mouseWorldRef.current.y}
-              transform={transformRef.current}
-              tick={joyTick}
-            />
+            <MouseTarget wx={mouseWorldRef.current.x} wy={mouseWorldRef.current.y} transform={transformRef.current} />
           )}
-
-          {game.status === "ended" && (
-            <EndOverlay
-              result={game.result}
-              onPlayAgain={() => { sfxClick(); onExit(); }}
-            />
+          {game.status === "ended" && game.result && (
+            <EndOverlay result={game.result} onPlayAgain={() => { sfxClick(); onExit(); }} />
           )}
           {game.status === "starting" && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="text-center" data-testid="countdown-overlay">
                 <div className="text-lg md:text-2xl font-terminal ink-text-purple mb-2">// INFECTION INCOMING</div>
-                <div
-                  className="font-splat ink-title-toxic ink-glitch leading-none"
-                  style={{ fontSize: "clamp(90px, 22vw, 180px)" }}
-                  data-testid="countdown-number"
-                >
-                  {Math.ceil(game.countdown)}
+                <div className="font-splat ink-title-toxic ink-glitch leading-none"
+                  style={{ fontSize: "clamp(90px, 22vw, 180px)" }} data-testid="countdown-number">
+                  {Math.ceil(game.countdown || 0)}
                 </div>
               </div>
             </div>
@@ -317,42 +347,9 @@ export default function GameScreen({ config, onExit }) {
 
 function Joystick({ baseX, baseY, dx, dy }) {
   return (
-    <div
-      className="pointer-events-none"
-      style={{
-        position: "absolute",
-        left: baseX - 70,
-        top: baseY - 70,
-        width: 140,
-        height: 140,
-        zIndex: 50,
-      }}
-      data-testid="virtual-joystick"
-    >
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          borderRadius: "50%",
-          background: "rgba(20, 16, 28, 0.55)",
-          border: "2px solid rgba(168, 85, 247, 0.7)",
-          boxShadow: "0 0 24px rgba(168,85,247,0.5), inset 0 0 24px rgba(168,85,247,0.2)",
-        }}
-      />
-      <div
-        style={{
-          position: "absolute",
-          left: 70 + dx - 28,
-          top: 70 + dy - 28,
-          width: 56,
-          height: 56,
-          borderRadius: "50%",
-          background:
-            "radial-gradient(circle at 30% 30%, #c084fc, #6b21a8 70%)",
-          border: "2px solid rgba(253, 230, 138, 0.9)",
-          boxShadow: "0 0 18px rgba(168,85,247,0.8)",
-        }}
-      />
+    <div className="pointer-events-none" style={{ position: "absolute", left: baseX - 70, top: baseY - 70, width: 140, height: 140, zIndex: 50 }} data-testid="virtual-joystick">
+      <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "rgba(20, 16, 28, 0.55)", border: "2px solid rgba(168, 85, 247, 0.7)", boxShadow: "0 0 24px rgba(168,85,247,0.5), inset 0 0 24px rgba(168,85,247,0.2)" }} />
+      <div style={{ position: "absolute", left: 70 + dx - 28, top: 70 + dy - 28, width: 56, height: 56, borderRadius: "50%", background: "radial-gradient(circle at 30% 30%, #c084fc, #6b21a8 70%)", border: "2px solid rgba(253, 230, 138, 0.9)", boxShadow: "0 0 18px rgba(168,85,247,0.8)" }} />
     </div>
   );
 }
@@ -361,26 +358,8 @@ function MouseTarget({ wx, wy, transform }) {
   const x = wx * transform.scale + transform.offX;
   const y = wy * transform.scale + transform.offY;
   return (
-    <div
-      className="pointer-events-none"
-      style={{
-        position: "absolute",
-        left: x - 18,
-        top: y - 18,
-        width: 36,
-        height: 36,
-        zIndex: 30,
-      }}
-    >
-      <div
-        style={{
-          width: "100%", height: "100%",
-          borderRadius: "50%",
-          border: "2px dashed rgba(251, 191, 36, 0.85)",
-          boxShadow: "0 0 14px rgba(251,191,36,0.45)",
-          animation: "ink-pulse 1.2s ease-in-out infinite",
-        }}
-      />
+    <div className="pointer-events-none" style={{ position: "absolute", left: x - 18, top: y - 18, width: 36, height: 36, zIndex: 30 }}>
+      <div style={{ width: "100%", height: "100%", borderRadius: "50%", border: "2px dashed rgba(251, 191, 36, 0.85)", boxShadow: "0 0 14px rgba(251,191,36,0.45)", animation: "ink-pulse 1.2s ease-in-out infinite" }} />
     </div>
   );
 }

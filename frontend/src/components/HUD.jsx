@@ -8,11 +8,12 @@ function fmtTime(s) {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
-export default function HUD({ game, arenaW, arenaH, onExit, muted, onToggleMute, onFullscreen }) {
+export default function HUD({ game, arenaW, arenaH, onExit, muted, onToggleMute, onFullscreen, roomId }) {
+  const localId = game._localId || "you";
   const survivors = game.players.filter(p => !p.infected && p.alive);
   const infected = game.players.filter(p => p.infected && p.alive);
   const remaining = Math.max(0, game.duration - game.elapsed);
-  const you = game.players.find(p => p.id === "you");
+  const you = game.players.find(p => p.id === localId);
 
   return (
     <>
@@ -29,7 +30,9 @@ export default function HUD({ game, arenaW, arenaH, onExit, muted, onToggleMute,
             KRONOS <span className="font-splat ink-text-purple text-sm sm:text-xl">INK PARK</span>
           </div>
           <div className="text-[10px] sm:text-xs font-terminal text-[#6b5d7a] mt-1">
-            map::INK_PARK_ALPHA · outbreak//07
+            {roomId
+              ? <>room::<span className="ink-text-toxic">{roomId}</span> · multiplayer</>
+              : <>map::INK_PARK_ALPHA · outbreak//07</>}
           </div>
         </div>
 
@@ -176,7 +179,7 @@ function Minimap({ game, arenaW, arenaH }) {
           {game.players.filter(p => p.alive).map(p => {
             const x = (p.x / arenaW) * W;
             const y = (p.y / arenaH) * H;
-            const isYou = p.id === "you";
+            const isYou = p.id === (game._localId || "you");
             const color = isYou ? "#fde68a" : (p.infected ? "#a855f7" : "#fbbf24");
             return (
               <div
